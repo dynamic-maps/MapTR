@@ -37,7 +37,11 @@ from .roiaware_pool3d import (
     points_in_boxes_cpu,
     points_in_boxes_gpu,
 )
-from .sparse_block import SparseBasicBlock, SparseBottleneck, make_sparse_convmodule
+try:
+    # spconv is not built (unused by MapTR); skip if the extension is unavailable
+    from .sparse_block import SparseBasicBlock, SparseBottleneck, make_sparse_convmodule
+except ImportError:
+    SparseBasicBlock = SparseBottleneck = make_sparse_convmodule = None
 from .voxel import DynamicScatter, Voxelization, dynamic_scatter, voxelization
 
 __all__ = [

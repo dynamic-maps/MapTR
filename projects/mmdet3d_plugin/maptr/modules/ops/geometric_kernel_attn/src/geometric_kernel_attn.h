@@ -14,7 +14,7 @@ geometric_kernel_attn_forward(
     const at::Tensor &attn_weight,
     const int im2col_step)
 {
-  if (value.type().is_cuda())
+  if (value.is_cuda())
   {
 
     return geometric_kernel_attn_cuda_forward(
@@ -33,7 +33,7 @@ geometric_kernel_attn_backward(
     const at::Tensor &grad_output,
     const int im2col_step)
 {
-  if (value.type().is_cuda())
+  if (value.is_cuda())
   {
     return geometric_kernel_attn_cuda_backward(
         value, spatial_shapes, level_start_index, sampling_loc, attn_weight, grad_output, im2col_step);
