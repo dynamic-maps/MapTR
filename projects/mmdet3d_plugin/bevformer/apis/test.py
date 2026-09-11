@@ -13,6 +13,7 @@ import mmcv
 import torch
 import torch.distributed as dist
 from mmcv.image import tensor2imgs
+from mmcv.parallel import scatter_kwargs
 from mmcv.runner import get_dist_info
 
 from mmdet.core import encode_mask_results
@@ -69,7 +70,11 @@ def custom_multi_gpu_test(model, data_loader, tmpdir=None, gpu_collect=False):
     have_mask = False
     for i, data in enumerate(data_loader):
         with torch.no_grad():
-            result = model(return_loss=False, rescale=True, **data)
+            # model is a plain module (not wrapped in DDP), so DataContainer
+            # fields (e.g. img_metas) must be unwrapped manually here.
+            device = next(model.parameters()).device
+            _, kwargs = scatter_kwargs(None, data, [device])
+            result = model(return_loss=False, rescale=True, **kwargs[0])
             # encode mask results
             if isinstance(result, dict):
                 if 'bbox_results' in result.keys():

@@ -924,21 +924,33 @@ args = parser.parse_args()
 
 
 if __name__ == '__main__':
-    train_version = f'{args.version}-trainval'
-    nuscenes_data_prep(
-        root_path=args.root_path,
-        can_bus_root_path=args.canbus,
-        info_prefix=args.extra_tag,
-        version=train_version,
-        dataset_name='NuScenesDataset',
-        out_dir=args.out_dir,
-        max_sweeps=args.max_sweeps)
-    test_version = f'{args.version}-test'
-    nuscenes_data_prep(
-        root_path=args.root_path,
-        can_bus_root_path=args.canbus,
-        info_prefix=args.extra_tag,
-        version=test_version,
-        dataset_name='NuScenesDataset',
-        out_dir=args.out_dir,
-        max_sweeps=args.max_sweeps)
+    if args.version == 'v1.0-mini':
+        # v1.0-mini has no separate '-trainval'/'-test' folders; train/val
+        # scenes are both derived from the single 'v1.0-mini' table.
+        nuscenes_data_prep(
+            root_path=args.root_path,
+            can_bus_root_path=args.canbus,
+            info_prefix=args.extra_tag,
+            version=args.version,
+            dataset_name='NuScenesDataset',
+            out_dir=args.out_dir,
+            max_sweeps=args.max_sweeps)
+    else:
+        train_version = f'{args.version}-trainval'
+        nuscenes_data_prep(
+            root_path=args.root_path,
+            can_bus_root_path=args.canbus,
+            info_prefix=args.extra_tag,
+            version=train_version,
+            dataset_name='NuScenesDataset',
+            out_dir=args.out_dir,
+            max_sweeps=args.max_sweeps)
+        test_version = f'{args.version}-test'
+        nuscenes_data_prep(
+            root_path=args.root_path,
+            can_bus_root_path=args.canbus,
+            info_prefix=args.extra_tag,
+            version=test_version,
+            dataset_name='NuScenesDataset',
+            out_dir=args.out_dir,
+            max_sweeps=args.max_sweeps)

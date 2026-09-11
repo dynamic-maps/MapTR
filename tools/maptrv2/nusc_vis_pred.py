@@ -6,7 +6,7 @@ import torch
 import warnings
 from mmcv import Config, DictAction
 from mmcv.cnn import fuse_conv_bn
-from mmcv.parallel import MMDataParallel, MMDistributedDataParallel
+from mmcv.parallel import MMDataParallel, MMDistributedDataParallel, scatter_kwargs
 from mmcv.runner import (get_dist_info, init_dist, load_checkpoint,
                          wrap_fp16_model)
 from mmdet3d.utils import collect_env, get_root_logger
@@ -22,6 +22,15 @@ from mmdet.datasets import replace_ImageToTensor
 import time
 import os.path as osp
 import numpy as np
+
+# torch>=2.6 defaults torch.load(weights_only=True), which breaks loading
+# legacy checkpoints (e.g. containing numpy scalars) via mmcv
+_torch_load = torch.load
+def _torch_load_compat(*args, **kwargs):
+    kwargs.setdefault('weights_only', False)
+    return _torch_load(*args, **kwargs)
+torch.load = _torch_load_compat
+
 from PIL import Image
 import matplotlib.pyplot as plt
 from matplotlib import transforms
@@ -185,7 +194,10 @@ def main():
         # segmentation dataset has `PALETTE` attribute
         model.PALETTE = dataset.PALETTE
     logger.info('DONE load check point')
-    model = MMDataParallel(model, device_ids=[0])
+    # NOTE: MMDataParallel's scatter path passes raw int device ids into
+    # torch internals that now expect torch.device objects; bypass it and
+    # unwrap DataContainer manually before calling the model instead.
+    model = model.cuda()
     model.eval()
 
     img_norm_cfg = cfg.img_norm_cfg
@@ -235,7 +247,8 @@ def main():
         #     continue
 
         with torch.no_grad():
-            result = model(return_loss=False, rescale=True, **data)
+            _, kwargs = scatter_kwargs(None, data, [next(model.parameters()).device])
+            result = model(return_loss=False, rescale=True, **kwargs[0])
         sample_dir = osp.join(args.show_dir, pts_filename)
         mmcv.mkdir_or_exist(osp.abspath(sample_dir))
 

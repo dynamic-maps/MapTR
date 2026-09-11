@@ -24,6 +24,14 @@ from mmdet.datasets import replace_ImageToTensor
 import time
 import os.path as osp
 
+# torch>=2.6 defaults torch.load(weights_only=True), which breaks loading
+# legacy checkpoints (e.g. containing numpy scalars) via mmcv
+_torch_load = torch.load
+def _torch_load_compat(*args, **kwargs):
+    kwargs.setdefault('weights_only', False)
+    return _torch_load(*args, **kwargs)
+torch.load = _torch_load_compat
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -92,7 +100,7 @@ def parse_args():
         choices=['none', 'pytorch', 'slurm', 'mpi'],
         default='none',
         help='job launcher')
-    parser.add_argument('--local_rank', type=int, default=0)
+    parser.add_argument('--local_rank', '--local-rank', type=int, default=0)
     args = parser.parse_args()
     if 'LOCAL_RANK' not in os.environ:
         os.environ['LOCAL_RANK'] = str(args.local_rank)
