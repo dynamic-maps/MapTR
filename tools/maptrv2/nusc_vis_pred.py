@@ -33,6 +33,7 @@ torch.load = _torch_load_compat
 
 from PIL import Image
 import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
 from matplotlib import transforms
 from matplotlib.patches import Rectangle
 import cv2
@@ -79,6 +80,106 @@ def perspective(cam_coords, proj_mat):
     pix_coords = pix_coords[:2, :] / (pix_coords[2, :] + 1e-7)
     pix_coords = pix_coords.transpose(1, 0)
     return pix_coords
+
+
+def colors_plt_to_bgr(colors_plt):
+    """Convert matplotlib color names to OpenCV BGR uint8 tuples."""
+    bgr = []
+    for name in colors_plt:
+        r, g, b = mcolors.to_rgb(name)
+        bgr.append((int(b * 255), int(g * 255), int(r * 255)))
+    return bgr
+
+
+def denorm_cam_img(img_tensor, mean, std, to_bgr):
+    """Undo Normalize() on a single (3, H, W) camera image tensor for cv2 drawing."""
+    img_np = img_tensor.permute(1, 2, 0).cpu().numpy()
+    img_np = img_np * std + mean
+    img_np = np.clip(img_np, 0, 255).astype(np.uint8)
+    if to_bgr:
+        img_np = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
+    return np.ascontiguousarray(img_np)
+
+
+def get_ground_z(img_meta, fallback=-1.6):
+    """Height of the ground plane in the lidar frame for this sample.
+
+    The lidar sits above the vehicle's ground reference by a calibrated
+    amount (varies per vehicle/sensor rig), so it must be read from
+    'lidar2ego' per-sample rather than assumed constant across scenes.
+    Falls back to the repo's existing -1.6 default (see
+    nuscenes_offlinemap_dataset.line_ego_to_pvmask) if unavailable.
+    """
+    lidar2ego = img_meta.get('lidar2ego')
+    if lidar2ego is None:
+        return fallback
+    return -float(np.asarray(lidar2ego)[2, 3])
+
+
+def add_bev_legend(colors_plt, class_names):
+    """Add a class-name/color legend to the current matplotlib BEV plot."""
+    handles = [plt.Line2D([0], [0], color=c, lw=2) for c in colors_plt]
+    plt.legend(handles, class_names, loc='upper right', fontsize=4,
+              framealpha=0.6, handlelength=1.2, borderpad=0.3, labelspacing=0.3)
+
+
+def draw_lines_on_cam_img(cam_img, lines_xy, labels, lidar2img_mat, colors_bgr, thickness=2,
+                          ground_z=-1.6):
+    """Project ground-plane map lines into a camera image and draw them.
+
+    lines_xy: list of (N, 2) arrays in lidar/ego coordinates.
+    lidar2img_mat: (4, 4) matrix mapping lidar coords to this camera's pixels.
+    ground_z: z of the road surface in the lidar frame (lidar sits above the
+        ground, so the ground is at a negative z, not z=0). Compute this
+        per-sample with get_ground_z() rather than hardcoding, since the
+        lidar mounting height varies by vehicle/sensor rig.
+
+    NOTE: this assumes a perfectly flat, level ground (no pitch/roll
+    correction). An attempt to correct for road slope/vehicle pitch via
+    lidar2global's full rotation made alignment worse (front/back cameras
+    skewed in opposite directions), so it was reverted; sloped-road scenes
+    may still show some offset, especially at range.
+    """
+    for pts, label in zip(lines_xy, labels):
+        proj_pts = []
+        for x, y in pts:
+            p = lidar2img_mat @ np.array([x, y, ground_z, 1.0])
+            if p[2] <= 1e-3:
+                proj_pts.append(None)
+                continue
+            u, v = p[0] / p[2], p[1] / p[2]
+            proj_pts.append((int(np.clip(u, -1e5, 1e5)), int(np.clip(v, -1e5, 1e5))))
+        color = colors_bgr[int(label)]
+        for p1, p2 in zip(proj_pts[:-1], proj_pts[1:]):
+            if p1 is None or p2 is None:
+                continue
+            cv2.line(cam_img, p1, p2, color, thickness, cv2.LINE_AA)
+    return cam_img
+
+
+def draw_legend_cv2(img, class_names, colors_bgr, origin=(10, 10)):
+    """Draw a color-swatch legend (class name + line color) in the top-left corner."""
+    x0, y0 = origin
+    row_h = 22
+    swatch_w = 24
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = 0.5
+    thickness = 1
+
+    text_sizes = [cv2.getTextSize(name, font, font_scale, thickness)[0] for name in class_names]
+    box_w = swatch_w + 8 + max(w for w, h in text_sizes) + 10
+    box_h = row_h * len(class_names) + 10
+    overlay = img.copy()
+    cv2.rectangle(overlay, (x0, y0), (x0 + box_w, y0 + box_h), (0, 0, 0), -1)
+    cv2.addWeighted(overlay, 0.5, img, 0.5, 0, img)
+
+    for i, (name, color) in enumerate(zip(class_names, colors_bgr)):
+        cy = y0 + 5 + i * row_h
+        cv2.line(img, (x0 + 5, cy + row_h // 2), (x0 + 5 + swatch_w, cy + row_h // 2), color, 3, cv2.LINE_AA)
+        cv2.putText(img, name, (x0 + swatch_w + 13, cy + row_h // 2 + 5),
+                    font, font_scale, (255, 255, 255), thickness, cv2.LINE_AA)
+    return img
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description='vis hdmaptr map gt label')
@@ -215,13 +316,14 @@ def main():
 
     # get color map: divider->r, ped->b, boundary->g
     colors_plt = ['orange', 'b', 'r', 'g']
-
+    colors_bgr = colors_plt_to_bgr(colors_plt)
 
     logger.info('BEGIN vis test dataset samples gt label & pred')
 
     bbox_results = []
     mask_results = []
     dataset = data_loader.dataset
+    legend_class_names = list(dataset.MAPCLASSES)
     have_mask = False
     # prog_bar = mmcv.ProgressBar(len(CANDIDATE))
     prog_bar = mmcv.ProgressBar(len(dataset))
@@ -323,6 +425,7 @@ def main():
                     # plt.plot(x, y, color=colors_plt[gt_label_3d])
                     # plt.scatter(x, y, color=colors_plt[gt_label_3d],s=1)
                 plt.imshow(car_img, extent=[-1.2, 1.2, -1.5, 1.5])
+                add_bev_legend(colors_plt, legend_class_names)
 
                 gt_fixedpts_map_path = osp.join(sample_dir, 'GT_fixednum_pts_MAP.png')
                 plt.savefig(gt_fixedpts_map_path, bbox_inches='tight', format='png',dpi=1200)
@@ -370,6 +473,57 @@ def main():
         pts_3d = result_dic['pts_3d']
         keep = scores_3d > args.score_thresh
 
+        # project predicted map lines onto each camera image (ground plane)
+        pred_lines_xy = [pred_pts.numpy() for pred_pts in pts_3d[keep]]
+        pred_labels_for_cam = labels_3d[keep].tolist()
+        lidar2img_list = img_metas[0]['lidar2img']
+        ground_z = get_ground_z(img_metas[0])
+        # NOTE: img[0, cam_idx]'s camera order follows filename_list (as set
+        # by the dataset's camera_types order), which does NOT match CAMS
+        # (front_left/front/front_right/...); derive the name per index
+        # instead of assuming enumerate(CAMS) lines up with the tensor.
+        cam_pred_imgs_by_name = {}
+        for cam_idx, filepath in enumerate(filename_list):
+            cam_name = osp.basename(filepath).split('__')[1]
+            cam_img = denorm_cam_img(img[0, cam_idx], mean, std, to_bgr)
+            lidar2img_mat = np.array(lidar2img_list[cam_idx])
+            cam_img = draw_lines_on_cam_img(
+                cam_img, pred_lines_xy, pred_labels_for_cam, lidar2img_mat, colors_bgr,
+                ground_z=ground_z)
+            cam_img = draw_legend_cv2(cam_img, legend_class_names, colors_bgr)
+            cv2.imwrite(osp.join(sample_dir, cam_name + '_PRED.jpg'), cam_img,
+                       [cv2.IMWRITE_JPEG_QUALITY, 70])
+            cam_pred_imgs_by_name[cam_name] = cam_img
+        cam_pred_imgs = [cam_pred_imgs_by_name[cam_name] for cam_name in CAMS]
+        row_1_pred = cv2.hconcat(cam_pred_imgs[:3])
+        row_2_pred = cv2.hconcat(cam_pred_imgs[3:])
+        surround_pred_img = cv2.vconcat([row_1_pred, row_2_pred])
+        cv2.imwrite(osp.join(sample_dir, 'surroud_view_PRED.jpg'), surround_pred_img,
+                   [cv2.IMWRITE_JPEG_QUALITY, 70])
+
+        # DEBUG: also project GT lines the same way, to isolate whether any
+        # misalignment comes from the projection math or from model error.
+        gt_lines_xy = [gt_pts.numpy() for gt_pts in gt_bboxes_3d[0].fixed_num_sampled_points]
+        gt_labels_for_cam = gt_labels_3d[0].tolist()
+        cam_gt_imgs_by_name = {}
+        for cam_idx, filepath in enumerate(filename_list):
+            cam_name = osp.basename(filepath).split('__')[1]
+            cam_img = denorm_cam_img(img[0, cam_idx], mean, std, to_bgr)
+            lidar2img_mat = np.array(lidar2img_list[cam_idx])
+            cam_img = draw_lines_on_cam_img(
+                cam_img, gt_lines_xy, gt_labels_for_cam, lidar2img_mat, colors_bgr,
+                ground_z=ground_z)
+            cam_img = draw_legend_cv2(cam_img, legend_class_names, colors_bgr)
+            cv2.imwrite(osp.join(sample_dir, cam_name + '_GTPROJ.jpg'), cam_img,
+                       [cv2.IMWRITE_JPEG_QUALITY, 70])
+            cam_gt_imgs_by_name[cam_name] = cam_img
+        cam_gt_imgs = [cam_gt_imgs_by_name[cam_name] for cam_name in CAMS]
+        row_1_gt = cv2.hconcat(cam_gt_imgs[:3])
+        row_2_gt = cv2.hconcat(cam_gt_imgs[3:])
+        surround_gt_img = cv2.vconcat([row_1_gt, row_2_gt])
+        cv2.imwrite(osp.join(sample_dir, 'surroud_view_GTPROJ.jpg'), surround_gt_img,
+                   [cv2.IMWRITE_JPEG_QUALITY, 70])
+
         plt.figure(figsize=(2, 4))
         plt.xlim(pc_range[0], pc_range[3])
         plt.ylim(pc_range[1], pc_range[4])
@@ -392,6 +546,7 @@ def main():
             s = str(pred_score_3d)
 
         plt.imshow(car_img, extent=[-1.2, 1.2, -1.5, 1.5])
+        add_bev_legend(colors_plt, legend_class_names)
 
         map_path = osp.join(sample_dir, 'PRED_MAP_plot.png')
         plt.savefig(map_path, bbox_inches='tight', format='png',dpi=1200)
